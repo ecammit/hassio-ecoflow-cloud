@@ -17,6 +17,8 @@ from homeassistant.components.integration.sensor import IntegrationSensor
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import (
     PERCENTAGE,
+    STATE_UNAVAILABLE,
+    STATE_UNKNOWN,
     UnitOfElectricCurrent,
     UnitOfElectricPotential,
     UnitOfEnergy,
@@ -25,9 +27,10 @@ from homeassistant.const import (
     UnitOfTemperature,
     UnitOfTime,
 )
-from homeassistant.core import HomeAssistant
+from homeassistant.core import Event, EventStateChangedData, HomeAssistant, callback
 from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.event import async_track_state_change_event
 from homeassistant.util import dt
 
 from . import (
@@ -639,3 +642,95 @@ class IntegralEnergySensorEntity(IntegrationSensor):
         )
         self.device_info = base.device_info
         self._attr_entity_registry_enabled_default = enabled_default and base.enabled_default
+
+class WattsConsumedSensorEntity(SensorEntity):
+    """Sensor to calculate power consumed as output minus input power for Energy panel."""
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_device_class = SensorDeviceClass.POWER
+    _attr_native_unit_of_measurement = UnitOfPower.WATT
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_should_poll = False
+
+    def __init__(
+        self,
+        output: WattsSensorEntity,
+        input: WattsSensorEntity,
+        title: str = "Power Consumed",
+    ):
+        self._attr_name = title
+        self._output_entity_id = output.entity_id
+        self._input_entity_id = input.entity_id
+        self._consumption: float | None = None
+
+    async def async_added_to_hass(self) -> None:
+        """Handle added to Hass."""
+        self.async_on_remove(
+            async_track_state_change_event(
+                self.hass, self._entity_ids, self._async_consumption_sensor_state_listener
+            )
+        )
+
+        # Replay current state of source entities
+        for entity_id in [self._output_entity_id, self._input_entity_id]:
+            state = self.hass.states.get(entity_id)
+            state_event: Event[EventStateChangedData] = Event(
+                "", {"entity_id": entity_id, "new_state": state, "old_state": None}
+            )
+            self._async_consumption_sensor_state_listener(state_event, update_state=False)
+
+        self._calc_consumption()
+
+    @property
+    def native_value(self) -> float | None:
+        """Return the state of the sensor."""
+        value: float | None = getattr(self, self._consumption)
+        return value
+
+    @callback
+    def _async_consumption_sensor_state_listener(
+        self, event: Event[EventStateChangedData], update_state: bool = True
+    ) -> None:
+        """Handle the sensor state changes."""
+        new_state = event.data["new_state"]
+        entity = event.data["entity_id"]
+
+        if (
+            new_state is None
+            or new_state.state is None
+            or new_state.state
+            in [
+                STATE_UNKNOWN,
+                STATE_UNAVAILABLE,
+            ]
+        ):
+            self.states[entity] = STATE_UNKNOWN
+            if not update_state:
+                return
+
+            self._calc_consumption()
+            self.async_write_ha_state()
+            return
+
+        try:
+            self.states[entity] = float(new_state.state)
+        except ValueError:
+            _LOGGER.warning(
+                "Unable to store state. Only numerical states are supported"
+            )
+
+        if not update_state:
+            return
+
+        self._calc_consumption()
+        self.async_write_ha_state()
+
+    @callback
+    def _calc_consumption(self) -> None:
+        """Calculate the consumption."""
+        if (
+            self.states.get(self._input_entity_id) is STATE_UNKNOWN
+            or self.states.get(self._output_entity_id) is STATE_UNKNOWN
+        ):
+            self._consumption = None
+            return
+        self._consumption = self.states[self._output_entity_id] - self.states[self._input_entity_id]

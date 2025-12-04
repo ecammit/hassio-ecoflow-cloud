@@ -20,6 +20,7 @@ from ...sensor import (
     QuotaScheduledStatusSensorEntity,
     RemainSensorEntity,
     VoltSensorEntity,
+    WattsConsumedSensorEntity,
 )
 from ...switch import EnabledEntity
 from .. import BaseDevice, const
@@ -28,6 +29,8 @@ from .. import BaseDevice, const
 class DeltaProUltra(BaseDevice):
 
     def sensors(self, client: EcoflowApiClient) -> list[BaseSensorEntity]:
+        input_power = InWattsSensorEntity(client, self, "hs_yj751_pd_appshow_addr.wattsInSum", const.TOTAL_IN_POWER).with_energy()
+        output_power = OutWattsSensorEntity(client, self, "hs_yj751_pd_appshow_addr.wattsOutSum", const.TOTAL_OUT_POWER).with_energy()
         return [
             QuotaScheduledStatusSensorEntity(client, self, 300), # required to call quota/all every 5 minutes
 
@@ -44,10 +47,9 @@ class DeltaProUltra(BaseDevice):
 
             MiscSensorEntity(client, self, "hs_yj751_pd_appshow_addr.sysErrCode", const.ERROR_CODE),
 
-            InWattsSensorEntity(client, self, "hs_yj751_pd_appshow_addr.wattsInSum", const.TOTAL_IN_POWER)
-                    .with_energy(),
-            OutWattsSensorEntity(client, self, "hs_yj751_pd_appshow_addr.wattsOutSum", const.TOTAL_OUT_POWER)
-                    .with_energy(),
+            input_power,
+            output_power,
+            WattsConsumedSensorEntity(client, self, output=output_power, input=input_power, name="Power Consumed"),
 
             InWattsSensorEntity(client, self, "hs_yj751_pd_appshow_addr.inAc5p8Pwr", const.PIO_PORT_IN_POWER)
                     .with_energy(),
